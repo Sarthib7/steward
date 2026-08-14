@@ -7,19 +7,21 @@
   "features": {
     "bot_user": {
       "display_name": "Steward",
-      "always_online": false
+      "always_online": true
     },
     "slash_commands": [
       {
         "command": "/steward-ask",
         "url": "https://conducive-unpenetratively-joaquina.ngrok-free.dev/api/v1/slack/commands",
         "description": "Ask Steward from memory",
+        "usage_hint": "<question>",
         "should_escape": false
       },
       {
         "command": "/steward-remember",
         "url": "https://conducive-unpenetratively-joaquina.ngrok-free.dev/api/v1/slack/commands",
         "description": "Store a fact in Steward memory",
+        "usage_hint": "<fact>",
         "should_escape": false
       },
       {
@@ -46,7 +48,8 @@
     "event_subscriptions": {
       "request_url": "https://conducive-unpenetratively-joaquina.ngrok-free.dev/api/v1/slack/events",
       "bot_events": [
-        "message.channels"
+        "message.channels",
+        "app_mention"
       ]
     },
     "interactivity": {

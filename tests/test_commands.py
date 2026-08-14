@@ -42,6 +42,7 @@ def client(monkeypatch, tmp_path):
     import steward.app as appmod
 
     appmod.settings = None
+    appmod._seen_mentions.clear()
     # Point ledger at tmp
     from steward.config import load_settings
 
@@ -323,3 +324,39 @@ def test_mention_digest_intent_posts_shell_not_not_determinable(client):
         assert "NOT DETERMINABLE" not in posted
         assert "*TLDR*" in posted
         assert "No Channel Memory for #all-hacknight yet" in posted
+
+
+def test_app_mention_posts_chat_message(client):
+    c, s, _ = client
+    import json
+
+    import steward.app as appmod
+
+    appmod.bot_user_id = "UBOT"
+    with (
+        patch("steward.app._compose_answer", new_callable=AsyncMock, return_value="SOURCED: hi") as compose,
+        patch("steward.app._slack_api", new_callable=AsyncMock, return_value={"ok": True}) as api,
+    ):
+        payload = {
+            "type": "event_callback",
+            "event": {
+                "type": "app_mention",
+                "channel": "C1",
+                "user": "U1",
+                "ts": "9.9",
+                "text": "<@UBOT> whats going on in the #all-hacknight",
+            },
+        }
+        raw = json.dumps(payload).encode()
+        r = c.post(
+            "/api/v1/slack/events",
+            content=raw,
+            headers={**_headers(raw), "Content-Type": "application/json"},
+        )
+        assert r.status_code == 200
+        _wait_awaited(api)
+        compose.assert_awaited()
+        assert compose.await_args.args[0] == "whats going on in the #all-hacknight"
+        assert api.await_args.args[0] == "chat.postMessage"
+        assert api.await_args.kwargs["channel"] == "C1"
+        assert api.await_args.kwargs["text"] == "SOURCED: hi"

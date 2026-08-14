@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 settings: Settings | None = None
 bot_user_id: str | None = None
 scheduler: AsyncIOScheduler | None = None
+_seen_mentions: set[str] = set()
 
 
 def get_settings() -> Settings:
@@ -272,8 +273,20 @@ async def _handle_event_message(event: dict, s: Settings) -> None:
     global bot_user_id
     text = event.get("text") or ""
     channel = event.get("channel")
-    if bot_user_id and f"<@{bot_user_id}>" in text:
+    is_mention = event.get("type") == "app_mention" or (
+        bool(bot_user_id) and f"<@{bot_user_id}>" in text
+    )
+    if is_mention:
+        key = f"{channel}:{event.get('ts') or ''}"
+        if key in _seen_mentions:
+            return
+        _seen_mentions.add(key)
+        if len(_seen_mentions) > 256:
+            _seen_mentions.clear()
+            _seen_mentions.add(key)
         if is_allowed(channel or "", s.allowlist_channels):
+            if bot_user_id:
+                text = text.replace(f"<@{bot_user_id}>", "").strip()
             try:
                 answer = await _compose_answer(text, s)
                 await _slack_api(
@@ -486,7 +499,7 @@ async def slack_events(request: Request):
         return Response(status_code=401)
 
     event = payload.get("event") or {}
-    if event.get("type") == "message" and "channel" in event:
+    if event.get("type") in ("message", "app_mention") and "channel" in event:
         asyncio.create_task(_handle_event_message(event, s))
     return Response(status_code=200)
 
