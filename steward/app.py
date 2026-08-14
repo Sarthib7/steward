@@ -12,7 +12,7 @@ from urllib.parse import parse_qs
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Response
+from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from steward.allowlist import REFUSE_TEXT, is_allowed
@@ -41,10 +41,14 @@ def get_settings() -> Settings:
     return settings
 
 
+ACK_TEXT = "Recalling…"
+
+
 async def _post_response_url(url: str, text: str, ephemeral: bool = True) -> None:
     payload = {
         "response_type": "ephemeral" if ephemeral else "in_channel",
         "text": text,
+        "replace_original": True,
     }
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -205,6 +209,25 @@ async def _handle_event_message(event: dict, s: Settings) -> None:
         log.exception("channel ingest failed")
 
 
+async def _after_ack(coro) -> None:
+    """Schedule work after Slack has the 200. Do not await Cognee here."""
+    asyncio.create_task(coro)
+
+
+async def _startup_background(s: Settings) -> None:
+    global bot_user_id
+    try:
+        await asyncio.to_thread(ensure_qdrant_adapter)
+    except Exception:
+        log.warning("qdrant adapter init failed", exc_info=True)
+    try:
+        auth = await _slack_api("auth.test", s.slack_bot_token)
+        bot_user_id = auth.get("user_id")
+    except Exception:
+        log.warning("auth.test failed", exc_info=True)
+    await _warm_start(s)
+
+
 async def _warm_start(s: Settings) -> None:
     try:
         await join_public_channels(s.slack_bot_token)
@@ -264,20 +287,12 @@ async def _cron_digest(kind: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bot_user_id, scheduler, settings
-    # Allow import/test without full env
-    if os.getenv("STEWARD_SKIP_STARTUP") != "1":
-        ensure_qdrant_adapter()
+    global scheduler, settings
+    # Listen first. Cognee register, join-all, and Qdrant stay off this path.
     if os.getenv("STEWARD_SKIP_STARTUP") == "1" or not os.getenv("SLACK_BOT_TOKEN"):
         yield
         return
     settings = load_settings()
-    try:
-        auth = await _slack_api("auth.test", settings.slack_bot_token)
-        bot_user_id = auth.get("user_id")
-    except Exception:
-        log.warning("auth.test failed", exc_info=True)
-
     scheduler = AsyncIOScheduler(timezone=settings.digest_tz)
     weekday = settings.digest_weekday
     hour = settings.digest_hour
@@ -292,7 +307,7 @@ async def lifespan(app: FastAPI):
         id="weekly",
     )
     scheduler.start()
-    asyncio.create_task(_warm_start(settings))
+    asyncio.create_task(_startup_background(settings))
     yield
     if scheduler:
         scheduler.shutdown(wait=False)
@@ -310,8 +325,12 @@ def _verify_request(request: Request, body: bytes, s: Settings) -> bool:
     )
 
 
+def _ack() -> JSONResponse:
+    return JSONResponse({"response_type": "ephemeral", "text": ACK_TEXT})
+
+
 @app.post("/api/v1/slack/commands")
-async def slack_commands(request: Request):
+async def slack_commands(request: Request, background_tasks: BackgroundTasks):
     body = await request.body()
     s = get_settings()
     if not _verify_request(request, body, s):
@@ -329,14 +348,16 @@ async def slack_commands(request: Request):
     if command == "/steward-ask":
         if not text:
             return JSONResponse({"response_type": "ephemeral", "text": "Usage: /steward-ask <question>"})
-        asyncio.create_task(_handle_ask(text, response_url, s))
-        return Response(status_code=200)
+        background_tasks.add_task(_after_ack, _handle_ask(text, response_url, s))
+        return _ack()
 
     if command == "/steward-remember":
         if not text:
             return JSONResponse({"response_type": "ephemeral", "text": "Usage: /steward-remember <fact>"})
-        asyncio.create_task(_handle_remember(text, channel_id, user_id, response_url, s))
-        return Response(status_code=200)
+        background_tasks.add_task(
+            _after_ack, _handle_remember(text, channel_id, user_id, response_url, s)
+        )
+        return _ack()
 
     if command == "/steward-digest":
         kind = text.lower().strip()
@@ -344,8 +365,8 @@ async def slack_commands(request: Request):
             return JSONResponse(
                 {"response_type": "ephemeral", "text": "Usage: /steward-digest daily|weekly"}
             )
-        asyncio.create_task(_handle_digest(kind, response_url, s))
-        return Response(status_code=200)
+        background_tasks.add_task(_after_ack, _handle_digest(kind, response_url, s))
+        return _ack()
 
     return JSONResponse({"response_type": "ephemeral", "text": "Unknown command"})
 

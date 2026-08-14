@@ -10,7 +10,7 @@ def test_load_settings_parses_allowlist_and_defaults(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "or-key")
     monkeypatch.setenv("VECTOR_DB_URL", "https://example.qdrant.io")
     monkeypatch.setenv("VECTOR_DB_KEY", "q-key")
-    for k in ("STEWARD_DIGEST_TZ", "GITHUB_REPOS", "LLM_MODEL"):
+    for k in ("STEWARD_DIGEST_TZ", "GITHUB_REPOS", "LLM_MODEL", "STEWARD_INGEST_CHANNELS"):
         monkeypatch.delenv(k, raising=False)
 
     s = load_settings()

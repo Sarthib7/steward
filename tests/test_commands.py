@@ -148,6 +148,7 @@ def test_ask_returns_before_slow_recall(client):
         elapsed = time.perf_counter() - t0
         assert r.status_code == 200
         assert elapsed < 1.0
+        assert r.json() == {"response_type": "ephemeral", "text": "Recalling…"}
 
 
 def test_ask_on_allowlist_calls_recall(client):
