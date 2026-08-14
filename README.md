@@ -2,6 +2,8 @@
 
 Slack memory agent for Cognee + Qdrant HackNight.
 
+Code: https://github.com/Sarthib7/steward
+
 Steward stores public-channel chat, GitHub issues and PRs from `topoteretes/cognee` and `qdrant/qdrant`, and facts you save on purpose. It answers from dataset `steward` on Qdrant Cloud. Cognee owns remember/recall. LLM calls go through OpenRouter (DeepSeek). Every claim is `SOURCED` or `NOT DETERMINABLE`.
 
 This process is FastAPI. Cognee is a library in the same process. Skip the Cognee frontend, `cognee/api/client.py`, and Cognee OAuth. This repo does not import Scout or Citadel.
@@ -17,6 +19,16 @@ Words: [`CONTEXT.md`](CONTEXT.md). Design: [`docs/superpowers/specs/2026-08-14-s
 | `/steward-digest daily\|weekly` | Digest of the Ingest Ledger for today or the current ISO week |
 
 Ask, remember, digest, and Steward replies run only in allowlist channels (`STEWARD_ALLOWLIST_CHANNELS`). Off-list slash gets the ephemeral line `Steward isn't enabled here`. Ingest can still join other public channels. Private channels and DMs are not memory.
+
+## Talk in Slack
+
+In an allowlist channel, ask with `/steward-ask <question>` or `@Steward <question>`.
+
+Example: `@Steward whats going on in the #all-hacknight`
+
+`NOT DETERMINABLE` means dataset `steward` has no sourced hit. The bot is not in that channel, there is no ingest yet, or the question is not in memory. That reply is empty Channel Memory. It is not a Slack timeout.
+
+To fill memory, run `/invite @Steward` in `#all-hacknight`, then `/steward-remember`, then ask again.
 
 ## Run locally
 
