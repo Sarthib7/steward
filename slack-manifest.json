@@ -1,0 +1,59 @@
+{
+  "display_information": {
+    "name": "Steward",
+    "description": "HackNight memory bot: ask, remember, digest",
+    "background_color": "#1a1a2e"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Steward",
+      "always_online": false
+    },
+    "slash_commands": [
+      {
+        "command": "/steward-ask",
+        "url": "https://conducive-unpenetratively-joaquina.ngrok-free.dev/api/v1/slack/commands",
+        "description": "Ask Steward from memory",
+        "should_escape": false
+      },
+      {
+        "command": "/steward-remember",
+        "url": "https://conducive-unpenetratively-joaquina.ngrok-free.dev/api/v1/slack/commands",
+        "description": "Store a fact in Steward memory",
+        "should_escape": false
+      },
+      {
+        "command": "/steward-digest",
+        "url": "https://conducive-unpenetratively-joaquina.ngrok-free.dev/api/v1/slack/commands",
+        "description": "daily or weekly digest",
+        "usage_hint": "daily|weekly",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "commands",
+        "chat:write",
+        "channels:read",
+        "channels:join",
+        "channels:history"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://conducive-unpenetratively-joaquina.ngrok-free.dev/api/v1/slack/events",
+      "bot_events": [
+        "message.channels"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
