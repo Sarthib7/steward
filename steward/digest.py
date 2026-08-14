@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -7,6 +8,28 @@ from zoneinfo import ZoneInfo
 SUMMARY_BLOCK_CAP = 20
 SUMMARY_TOTAL_CAP = 40
 TLDR_CAP = 5
+
+_INTENT = re.compile(
+    r"(what'?s\s+going\s+on|what\s+is\s+going\s+on|catch\s+me\s+up)",
+    re.I,
+)
+_SLACK_CH = re.compile(r"<#([A-Z0-9]+)\|([^>]+)>")
+_HASH_CH = re.compile(r"#([a-z0-9][a-z0-9._-]*)", re.I)
+
+
+def is_digest_intent(text: str) -> bool:
+    return bool(_INTENT.search(text or ""))
+
+
+def parse_named_channel(text: str) -> tuple[str | None, str | None]:
+    raw = text or ""
+    m = _SLACK_CH.search(raw)
+    if m:
+        return m.group(1), m.group(2)
+    m = _HASH_CH.search(raw)
+    if m:
+        return None, m.group(1)
+    return None, None
 
 
 def window_bounds(kind: str, tz_name: str, now: datetime) -> tuple[datetime, datetime]:
@@ -56,41 +79,51 @@ def render_digest(
     channel_names: dict[str, str] | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    focus_channel_id: str | None = None,
+    focus_channel_name: str | None = None,
 ) -> str:
     channel_names = channel_names or {}
     allowed = set(allowlist)
+    focus_name = (focus_channel_name or "").lstrip("#") or None
 
     if start is not None and end is not None:
         rows = [r for r in rows if _in_window(r, start, end)]
 
-    slack_rows = [
-        r
-        for r in rows
-        if r.get("origin") in ("slack_channel", "remember")
-        and (r.get("channel_id") in allowed or r.get("origin") == "remember")
-        and r.get("origin") != "seed"
-    ]
-    # remember without channel still counts under Slack if channel_id on allowlist or None
-    slack_rows = [
-        r
-        for r in rows
-        if r.get("origin") in ("slack_channel", "remember")
-        and r.get("origin") != "seed"
-        and (r.get("channel_id") is None or r.get("channel_id") in allowed)
-        and not (r.get("origin") == "slack_channel" and r.get("channel_id") not in allowed)
-    ]
+    if focus_channel_id or focus_name:
+        slack_rows = [
+            r
+            for r in rows
+            if r.get("origin") == "slack_channel"
+            and (not focus_channel_id or r.get("channel_id") == focus_channel_id)
+        ]
+        if focus_channel_id and focus_name:
+            channel_names = {**channel_names, focus_channel_id: focus_name}
+    else:
+        # remember without channel still counts under Slack if channel_id on allowlist or None
+        slack_rows = [
+            r
+            for r in rows
+            if r.get("origin") in ("slack_channel", "remember")
+            and r.get("origin") != "seed"
+            and (r.get("channel_id") is None or r.get("channel_id") in allowed)
+            and not (r.get("origin") == "slack_channel" and r.get("channel_id") not in allowed)
+        ]
     github_rows = [r for r in rows if r.get("origin") == "github"]
 
     summary_bullets: list[tuple[str, str, str]] = []  # (section, text, permalink)
     slack_by_ch: dict[str, list[dict]] = {}
     for r in slack_rows:
-        if r.get("origin") == "slack_channel" and r.get("channel_id") not in allowed:
+        if (
+            not (focus_channel_id or focus_name)
+            and r.get("origin") == "slack_channel"
+            and r.get("channel_id") not in allowed
+        ):
             continue
         cid = r.get("channel_id") or "_facts"
         slack_by_ch.setdefault(cid, []).append(r)
 
     sections: list[str] = []
-    label = "daily" if kind == "daily" else "weekly"
+    label = kind
     header = f"*Steward {label} digest"
     if title_day:
         header += f" — {title_day}"
@@ -123,8 +156,13 @@ def render_digest(
             slack_section_lines.append("_No remembered channel activity in this window._")
 
     if not slack_by_ch:
-        slack_section_lines.append("*Slack*")
-        slack_section_lines.append("_No remembered channel activity in this window._")
+        if focus_name or focus_channel_id:
+            ch = focus_name or focus_channel_id
+            slack_section_lines.append(f"*Slack · #{ch}*")
+            slack_section_lines.append(f"No Channel Memory for #{ch} yet")
+        else:
+            slack_section_lines.append("*Slack*")
+            slack_section_lines.append("_No remembered channel activity in this window._")
 
     # GitHub blocks
     gh_by_repo: dict[str, list[dict]] = {}

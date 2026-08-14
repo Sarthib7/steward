@@ -17,11 +17,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from steward.allowlist import REFUSE_TEXT, is_allowed
 from steward.config import Settings, load_settings
-from steward.digest import render_digest, window_bounds
+from steward.digest import is_digest_intent, parse_named_channel, render_digest, window_bounds
 from steward.events import format_channel_memory_text, should_ingest_message
 from steward.github_ingest import fetch_repo_issues, map_issue_to_memory, parse_repos
 from steward.grounded import filter_hits_for_allowlist, format_grounded_answer
-from steward.join_channels import join_channel_ids, join_public_channels
+from steward.history import fetch_channel_history, messages_to_ingest
+from steward.join_channels import channel_id_for_name, join_channel_ids, join_public_channels
 from steward.ledger import append_row, has_github_key, read_rows
 from steward.memory import ensure_qdrant_adapter, recall, remember_text
 from steward.slack_verify import verify_slack_signature
@@ -42,6 +43,7 @@ def get_settings() -> Settings:
 
 
 ACK_TEXT = "Recalling…"
+HACKNIGHT_CHANNEL_ID = "C0BP8V9S0UC"
 
 
 async def _post_response_url(url: str, text: str, ephemeral: bool = True) -> None:
@@ -90,18 +92,64 @@ async def _ingest_github_since(since: str, s: Settings) -> int:
     return added
 
 
+def _occurred_at(event: dict) -> str:
+    ts = event.get("ts")
+    if ts:
+        try:
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError):
+            pass
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _archives_permalink(channel: str, ts: str) -> str:
+    return f"https://slack.com/archives/{channel}/p{str(ts).replace('.', '')}"
+
+
+async def _situation_digest(text: str, s: Settings) -> str:
+    cid, name = parse_named_channel(text)
+    if name and not cid:
+        try:
+            cid = await channel_id_for_name(name, s.slack_bot_token)
+        except Exception:
+            log.warning("channel lookup failed", exc_info=True)
+            cid = None
+    now = datetime.now(timezone.utc)
+    start, end = window_bounds("weekly", s.digest_tz, now)
+    since = start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:
+        await _ingest_github_since(since, s)
+    except Exception:
+        log.warning("github poll for situation failed", exc_info=True)
+    rows = read_rows(s.ledger_path)
+    return render_digest(
+        "situation",
+        rows,
+        allowlist=s.memory_channels(),
+        focus_channel_id=cid,
+        focus_channel_name=name,
+        start=start,
+        end=end,
+    )
+
+
+async def _compose_answer(text: str, s: Settings) -> str:
+    if is_digest_intent(text):
+        return await _situation_digest(text, s)
+    hits = await recall(text, datasets=[s.dataset_name])
+    norm = []
+    for h in hits:
+        if isinstance(h, dict):
+            norm.append(h)
+        else:
+            norm.append({"text": str(h), "origin": "unknown"})
+    filtered = filter_hits_for_allowlist(norm, s.memory_channels())
+    return format_grounded_answer(text, filtered)
+
+
 async def _handle_ask(text: str, response_url: str, s: Settings) -> None:
     try:
-        hits = await recall(text, datasets=[s.dataset_name])
-        # Normalize hits that may be strings
-        norm = []
-        for h in hits:
-            if isinstance(h, dict):
-                norm.append(h)
-            else:
-                norm.append({"text": str(h), "origin": "unknown"})
-        filtered = filter_hits_for_allowlist(norm, s.memory_channels())
-        answer = format_grounded_answer(text, filtered)
+        answer = await _compose_answer(text, s)
         await _post_response_url(response_url, answer)
     except Exception:
         log.exception("ask failed")
@@ -160,12 +208,86 @@ async def _handle_digest(kind: str, response_url: str, s: Settings) -> None:
         await _post_response_url(response_url, "Something went wrong")
 
 
+async def _remember_channel_event(event: dict, permalink: str, s: Settings) -> None:
+    text = format_channel_memory_text(event, permalink)
+    await remember_text(
+        text,
+        dataset_name=s.dataset_name,
+        external_metadata={
+            "origin": "slack_channel",
+            "channel_id": event.get("channel"),
+            "permalink": permalink,
+        },
+    )
+    append_row(
+        s.ledger_path,
+        {
+            "origin": "slack_channel",
+            "channel_id": event.get("channel"),
+            "repo": None,
+            "permalink": permalink,
+            "text": event.get("text") or "",
+            "occurred_at": _occurred_at(event),
+            "updated_at": None,
+            "state": None,
+            "user_id": event.get("user"),
+            "kind": "message",
+        },
+    )
+
+
+def _already_ingested(channel_id: str, ts: str, s: Settings) -> bool:
+    if not ts:
+        return False
+    compact = ts.replace(".", "")
+    for row in read_rows(s.ledger_path):
+        if row.get("origin") != "slack_channel":
+            continue
+        if row.get("channel_id") != channel_id:
+            continue
+        perm = row.get("permalink") or ""
+        if ts in perm or compact in perm:
+            return True
+    return False
+
+
+async def _backfill_channel(s: Settings, channel_id: str) -> None:
+    out = await fetch_channel_history(s.slack_bot_token, channel_id)
+    if out.get("error"):
+        log.warning("history %s: %s", channel_id, out["error"])
+        return
+    for item in messages_to_ingest(out["messages"], channel_id, bot_user_id or ""):
+        ev = item["event"]
+        ts = ev.get("ts") or ""
+        if _already_ingested(channel_id, ts, s):
+            continue
+        permalink = _archives_permalink(channel_id, ts)
+        try:
+            await _remember_channel_event(ev, permalink, s)
+        except Exception:
+            log.exception("backfill ingest failed ts=%s", ts)
+
+
 async def _handle_event_message(event: dict, s: Settings) -> None:
     global bot_user_id
+    text = event.get("text") or ""
+    channel = event.get("channel")
+    if bot_user_id and f"<@{bot_user_id}>" in text:
+        if is_allowed(channel or "", s.allowlist_channels):
+            try:
+                answer = await _compose_answer(text, s)
+                await _slack_api(
+                    "chat.postMessage",
+                    s.slack_bot_token,
+                    channel=channel,
+                    text=answer,
+                )
+            except Exception:
+                log.exception("mention ask failed")
+        return
     gate = s.memory_channels() if s.ingest_channels else None
     if not should_ingest_message(event, bot_user_id or "", ingest_channels=gate):
         return
-    channel = event.get("channel")
     ts = event.get("ts")
     permalink = f"slack://channel?team=&id={channel}&message={ts}"
     try:
@@ -179,32 +301,8 @@ async def _handle_event_message(event: dict, s: Settings) -> None:
             permalink = data["permalink"]
     except Exception:
         log.warning("permalink fetch failed", exc_info=True)
-    text = format_channel_memory_text(event, permalink)
     try:
-        await remember_text(
-            text,
-            dataset_name=s.dataset_name,
-            external_metadata={
-                "origin": "slack_channel",
-                "channel_id": channel,
-                "permalink": permalink,
-            },
-        )
-        append_row(
-            s.ledger_path,
-            {
-                "origin": "slack_channel",
-                "channel_id": channel,
-                "repo": None,
-                "permalink": permalink,
-                "text": event.get("text") or "",
-                "occurred_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": None,
-                "state": None,
-                "user_id": event.get("user"),
-                "kind": "message",
-            },
-        )
+        await _remember_channel_event(event, permalink, s)
     except Exception:
         log.exception("channel ingest failed")
 
@@ -234,13 +332,18 @@ async def _warm_start(s: Settings) -> None:
     except Exception:
         log.warning("join channels failed", exc_info=True)
     try:
-        join_results = await join_channel_ids(
-            s.slack_bot_token, s.memory_channels()
-        )
+        ids = list(s.memory_channels())
+        if HACKNIGHT_CHANNEL_ID not in ids:
+            ids.append(HACKNIGHT_CHANNEL_ID)
+        join_results = await join_channel_ids(s.slack_bot_token, ids)
         for cid, status in join_results.items():
             log.warning("join %s: %s", cid, status)
     except Exception:
         log.warning("ingest join failed", exc_info=True)
+    try:
+        await _backfill_channel(s, HACKNIGHT_CHANNEL_ID)
+    except Exception:
+        log.warning("history backfill failed", exc_info=True)
     try:
         since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat().replace("+00:00", "Z")
         await _ingest_github_since(since, s)

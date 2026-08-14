@@ -67,6 +67,21 @@ async def join_public_channels(token: str, client: httpx.AsyncClient | None = No
             await client.aclose()
 
 
+async def channel_id_for_name(
+    name: str,
+    token: str,
+    client: httpx.AsyncClient | None = None,
+) -> str | None:
+    name = (name or "").lstrip("#")
+    if not name:
+        return None
+    channels = await list_public_channels(token, client=client)
+    for ch in channels:
+        if ch.get("name") == name:
+            return ch.get("id")
+    return None
+
+
 async def join_channel_ids(
     token: str,
     channel_ids: list[str],

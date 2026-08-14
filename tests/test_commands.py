@@ -212,3 +212,114 @@ def test_ask_cites_ingest_channel_memory(client, monkeypatch):
         posted = " ".join(str(call.args) for call in post.await_args_list)
         assert "SOURCED" in posted
         assert "Qdrant Cloud" in posted
+
+
+def test_ask_digest_intent_skips_recall_and_posts_shell(client):
+    c, s, _ = client
+    from datetime import datetime, timezone
+
+    from steward.ledger import append_row
+
+    now = datetime.now(timezone.utc).isoformat()
+    append_row(
+        s.ledger_path,
+        {
+            "origin": "github",
+            "channel_id": None,
+            "repo": "qdrant/qdrant",
+            "permalink": "https://github.com/qdrant/qdrant/issues/1",
+            "text": "issue #1: payload index",
+            "occurred_at": now,
+            "updated_at": now,
+            "state": "open",
+            "user_id": None,
+            "kind": "issue",
+        },
+    )
+    with (
+        patch("steward.app.recall", new_callable=AsyncMock) as rec,
+        patch("steward.app._ingest_github_since", new_callable=AsyncMock, return_value=1),
+        patch("steward.app.channel_id_for_name", new_callable=AsyncMock, return_value="C0BP8V9S0UC"),
+        patch("steward.app._post_response_url", new_callable=AsyncMock) as post,
+    ):
+        body = (
+            b"command=%2Fsteward-ask"
+            b"&text=whats%20going%20on%20in%20the%20%23all-hacknight"
+            b"&channel_id=C1&user_id=U1&response_url=https%3A%2F%2Fexample.com"
+        )
+        r = c.post("/api/v1/slack/commands", content=body, headers=_headers(body))
+        assert r.status_code == 200
+        _wait_awaited(post)
+        rec.assert_not_awaited()
+        posted = post.await_args.args[1]
+        assert posted.strip() != "NOT DETERMINABLE"
+        assert "NOT DETERMINABLE" not in posted
+        assert "*TLDR*" in posted
+        assert "*Summary*" in posted
+        assert "*Attention / action required*" in posted
+        assert "No Channel Memory for #all-hacknight yet" in posted
+        assert "qdrant/qdrant" in posted
+
+
+def test_mention_digest_intent_posts_shell_not_not_determinable(client):
+    c, s, _ = client
+    import steward.app as appmod
+
+    appmod.bot_user_id = "UBOT"
+    from datetime import datetime, timezone
+
+    from steward.ledger import append_row
+
+    now = datetime.now(timezone.utc).isoformat()
+    append_row(
+        s.ledger_path,
+        {
+            "origin": "github",
+            "channel_id": None,
+            "repo": "topoteretes/cognee",
+            "permalink": "https://github.com/topoteretes/cognee/issues/2",
+            "text": "issue #2: remember api",
+            "occurred_at": now,
+            "updated_at": now,
+            "state": "open",
+            "user_id": None,
+            "kind": "issue",
+        },
+    )
+    with (
+        patch("steward.app.recall", new_callable=AsyncMock) as rec,
+        patch("steward.app._ingest_github_since", new_callable=AsyncMock, return_value=1),
+        patch("steward.app.channel_id_for_name", new_callable=AsyncMock, return_value="C0BP8V9S0UC"),
+        patch("steward.app._slack_api", new_callable=AsyncMock, return_value={"ok": True}) as api,
+    ):
+        payload = {
+            "type": "event_callback",
+            "event": {
+                "type": "message",
+                "channel": "C1",
+                "user": "U1",
+                "ts": "1.2",
+                "text": "<@UBOT> whats going on in the #all-hacknight",
+            },
+        }
+        import json
+
+        raw = json.dumps(payload).encode()
+        r = c.post(
+            "/api/v1/slack/events",
+            content=raw,
+            headers={**_headers(raw), "Content-Type": "application/json"},
+        )
+        assert r.status_code == 200
+        _wait_awaited(api)
+        rec.assert_not_awaited()
+        texts = [
+            str(call.kwargs.get("text") or (call.args[3] if len(call.args) > 3 else ""))
+            for call in api.await_args_list
+        ]
+        posted = " ".join(texts)
+        if not posted.strip():
+            posted = " ".join(str(call) for call in api.await_args_list)
+        assert "NOT DETERMINABLE" not in posted
+        assert "*TLDR*" in posted
+        assert "No Channel Memory for #all-hacknight yet" in posted

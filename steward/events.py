@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def should_ingest_message(event: dict, bot_user_id: str, ingest_channels: list[str] | None = None) -> bool:
-    if event.get("subtype") == "bot_message":
+    if event.get("subtype") == "bot_message" or event.get("bot_id"):
         return False
     text = (event.get("text") or "").strip()
     if not text:
